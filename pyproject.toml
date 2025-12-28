@@ -1,0 +1,68 @@
+[project]
+name = "nonebot-plugin-uniconf"
+version = "0.1.0"
+description = "File config manager for nonebot2"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "aiofiles>=25.1.0",
+    "nonebot-plugin-localstore>=0.7.4",
+    "nonebot2>=2.4.4",
+    "tomli>=2.3.0",
+    "tomli-w>=1.2.0",
+    "watchfiles>=1.1.1",
+]
+[project.urls]
+"Homepage" = "https://github.com/LiteSuggarDEV/nonebot_plugin_uniconf"
+"Source" = "https://github.com/LiteSuggarDEV/nonebot_plugin_uniconf"
+"Issue Tracker" = "https://github.com/LiteSuggarDEV/nonebot_plugin_uniconf/issues"
+
+
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "F",     # Pyflakes
+    "W",     # pycodestyle warnings
+    "E",     # pycodestyle errors
+    "UP",    # pyupgrade
+    "ASYNC", # flake8-async
+    "C4",    # flake8-comprehensions
+    "T10",   # flake8-debugger
+    "PYI",   # flake8-pyi
+    "PT",    # flake8-pytest-style
+    "Q",     # flake8-quotes
+    "RUF",   # Ruff-specific rules
+    "I",     # isort
+    "PERF",  # pylint-performance
+]
+ignore = [
+    "E402",   # module-import-not-at-top-of-file
+    "E501",   # line-too-long
+    "UP037",  # quoted-annotation
+    "RUF001", # ambiguous-unicode-character-string
+    "RUF002", # ambiguous-unicode-character-docstring
+    "RUF003", # ambiguous-unicode-character-comment
+]
+
+[tool.pyright]
+typeCheckingMode = "standard"
+
+[tool.nonebot]
+plugins = ["nonebot_plugin_uniconf", "nonebot_plugin_localstore"]
+adapters = [
+    { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" },
+]
+
+
+[dependency-groups]
+dev = [
+    "nonebot2[fastapi]>=2.4.4",
+    "nonebug>0.1.0",
+    "pyright>=1.1.407",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.3.0",
+]
