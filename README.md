@@ -1,0 +1,2 @@
+# nonebot_plugin_uniconf
+支持callback的统一的异步Toml配置/文件管理器
