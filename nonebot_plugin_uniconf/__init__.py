@@ -13,7 +13,6 @@ from .types import (
 __plugin_meta__ = PluginMetadata(
     name="Uniconfig-配置文件管理器",
     description="适用于NoneBot的文件配置文件管理器",
-    # usage="https://docs.suggar.top/project/uniconf/", # 这里还没写
     usage="参考README.md",
     homepage="https://github.com/LiteSuggarDEV/nonebot_plugin_uniconf/",
     type="library",

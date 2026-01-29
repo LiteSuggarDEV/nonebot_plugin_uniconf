@@ -1,12 +1,12 @@
 <div align="center">
-  <a href="https://github.com/LiteSuggarDEV/nonebot_plugin_suggarchat/">
-    <img src="https://github.com/user-attachments/assets/b5162036-5b17-4cf4-b0cb-8ec842a71bc6" width="200" alt="SuggarChat Logo">
+  <a href="https://github.com/LiteSuggarDEV/nonebot_plugin_uniconf/">
+    <img src="https://github.com/user-attachments/assets/b5162036-5b17-4cf4-b0cb-8ec842a71bc6" width="200" alt="uniconf Logo">
   </a>
   <h1>nonebot-plugin-uniconf</h1>
   <h3>配置文件管理器</h3>
 
   <p>
-    <a href="https://pypi.org/project/nonebot-plugin-suggarchat/">
+    <a href="https://pypi.org/project/nonebot-plugin-uniconf/">
       <img src="https://img.shields.io/pypi/v/nonebot-plugin-uniconf?color=blue&style=flat-square" alt="PyPI Version">
     </a>
     <a href="https://www.python.org/">
@@ -34,6 +34,7 @@
 - **异步支持**：完全异步实现，不阻塞事件循环
 - **灵活的配置定义**：支持多种配置类定义方式
 - **文件和目录监控**：支持对配置文件和自定义文件/目录的监控
+- **环境变量支持**：支持在配置中使用环境变量占位符（`${VAR}` 或 `{{VAR}}`）
 
 ## 安装
 
@@ -104,6 +105,23 @@ logger.debug(config.my_option)
 
 ## 高级用法
 
+### 环境变量支持
+
+如果需要在配置中使用环境变量，可以使用 `EnvfulConfigManager`
+
+```python
+from nonebot_plugin_uniconf import EnvfulConfigManager
+
+class MyEnvDataManager(EnvfulConfigManager[MyConfig]):
+    config: MyConfig
+
+    async def __apost_init__(self):
+        # 配置中的环境变量会被自动替换
+        logger.info(f"配置已加载: {self.config.my_option}")
+```
+
+配置文件中可以使用 `${ENV_VAR}` 或 `{{ENV_VAR}}` 格式的环境变量占位符。
+
 ### 直接使用 UniConfigManager
 
 如果需要更细粒度的控制，可以直接使用 UniConfigManager：
@@ -143,8 +161,21 @@ await UniConfigManager().add_directory("data", on_directory_change)
 - `config: T` - 配置实例
 - `config_class: Type[T]` - 配置类类型
 - `safe_get_config()` - 安全获取配置，等待配置加载完成
+- `refresh_config()` - 刷新当前配置
 - `__apost_init__()` - 异步初始化后置处理方法
 - `(classmethod) __init_classvars__()` - 类变量初始化方法
+- `_owner_name` - 拥有者插件名称
+- `_inited` - 是否已初始化
+- `__lateinit__` - 适用于需要延迟初始化的 DataManager
+
+### EnvfulConfigManager[T]
+
+支持环境变量的配置管理器，继承自 BaseDataManager。
+
+- `ins_config: T` - 实际配置实例
+- `config: T` - 处理过环境变量的配置实例（重写了父类的 config 属性）
+- `_cached_env_config` - 缓存的环境变量处理后的配置
+- `_conf_id` - 配置ID，用于检测配置是否更改
 
 ### UniConfigManager[T]
 
@@ -155,12 +186,28 @@ await UniConfigManager().add_directory("data", on_directory_change)
 - `add_config()` - 添加配置类
 - `get_config()` - 获取配置实例
 - `get_config_by_class()` - 根据配置类获取配置实例
+- `get_config_class()` - 获取配置类类型
 - `reload_config()` - 重新加载配置
 - `save_config()` - 保存配置
+- `loads_config()` - 加载配置实例
 - `add_file()` - 添加文件监控
 - `add_directory()` - 添加目录监控
 - `get_plugin_files()` - 获取插件注册的文件
 - `get_cached_file_by_path()` - 获取缓存的文件内容
+- `get_config_classes()` - 获取所有已注册的配置类
+- `get_config_instances()` - 获取所有配置实例
+- `has_config_class()` - 检查是否存在指定插件的配置类
+- `has_config_instance()` - 检查是否存在指定插件的配置实例
+- `get_config_instance()` - 获取指定插件的配置实例
+- `get_config_instance_not_none()` - 获取指定插件的配置实例（非空）
+- `get_config_class_by_name()` - 根据插件名称获取配置类
+
+#### 其他实用方法
+
+- `_init_config_or_nothing()` - 初始化配置文件（如果不存在）
+- `_add_watch_path()` - 添加路径监控
+- `_config_reload_callback()` - 配置重载回调函数
+- `_file_reload_callback()` - 文件重载回调函数
 
 ## 使用场景
 
@@ -169,6 +216,7 @@ await UniConfigManager().add_directory("data", on_directory_change)
 - 需要热重载配置的机器人插件
 - 需要管理多个配置文件的插件
 - 需要在运行时动态修改配置的插件
+- 需要使用环境变量的插件
 
 ## 许可证
 
