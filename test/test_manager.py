@@ -2,6 +2,7 @@ import os
 import shutil
 
 import pytest
+from nonebot import require
 from nonebug import App  # type:ignore
 from pydantic import BaseModel
 
@@ -19,6 +20,7 @@ class TestConfigWithEnv(TestConfig):
 @pytest.mark.asyncio
 async def test_integration_full_config_env(app: App):
     """测试完整的配置生命周期(带有环境变量支持)"""
+    require("nonebot_plugin_localstore")
     from nonebot_plugin_localstore import get_config_dir
 
     from nonebot_plugin_uniconf import EnvfulConfigManager, UniConfigManager
@@ -55,6 +57,7 @@ async def test_integration_full_config_env(app: App):
 @pytest.mark.asyncio
 async def test_integration_full_config_lifecycle(app: App):
     """测试完整的配置生命周期"""
+    require("nonebot_plugin_localstore")
     from nonebot_plugin_localstore import get_config_dir
 
     from nonebot_plugin_uniconf import BaseDataManager, UniConfigManager

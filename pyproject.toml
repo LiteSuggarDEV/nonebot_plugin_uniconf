@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-uniconf"
-version = "0.1.0"
+version = "0.1.1"
 description = "File config manager for nonebot2"
 readme = "README.md"
 requires-python = ">=3.10"
