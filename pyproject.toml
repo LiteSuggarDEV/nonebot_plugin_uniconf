@@ -18,6 +18,9 @@ dependencies = [
 "Issue Tracker" = "https://github.com/LiteSuggarDEV/nonebot_plugin_uniconf/issues"
 
 
+[tool.setuptools.packages.find]
+include = ["nonebot_plugin_*"]
+
 
 [tool.ruff]
 line-length = 88
