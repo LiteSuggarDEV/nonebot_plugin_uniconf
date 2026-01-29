@@ -37,6 +37,8 @@ jobs:
           python-path: ${{ env.PYTHON_BIN }}
           pylance-version: latest-release
 
+      - name: Run tests
+        run: uv run pytest .
       - name: Check code format
         uses: astral-sh/ruff-action@v3
         with:

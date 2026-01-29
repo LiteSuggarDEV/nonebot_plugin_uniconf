@@ -30,6 +30,8 @@ jobs:
         run: |
           PYTHON_BIN="$(uv run python -c 'import sys; print(sys.executable)')"
           echo "PYTHON_BIN=$PYTHON_BIN" >> $GITHUB_ENV
+      - name: Run tests
+        run: uv run pytest .
 
       - name: Run Pyright
         uses: jakebailey/pyright-action@v2

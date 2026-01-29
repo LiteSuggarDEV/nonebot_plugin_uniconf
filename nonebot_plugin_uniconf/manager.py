@@ -34,7 +34,7 @@ def replace_env_vars(
     elif isinstance(data_copy, list):
         for i in range(len(data_copy)):
             data_copy[i] = replace_env_vars(data_copy[i])
-    else:
+    elif isinstance(data_copy, str):
         patterns = (
             r"\$\{(\w+)\}",
             r"\{\{(\w+)\}\}",
