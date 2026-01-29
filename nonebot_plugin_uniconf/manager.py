@@ -1,68 +1,87 @@
-# Ref:https://github.com/AmritaBot/Amrita/blob/main/amrita/config_manager.py
 import asyncio
+import copy
+import os
+import pickle
+import re
 from abc import ABC
 from asyncio import Lock, Task
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
 from io import StringIO
 from pathlib import Path
-from typing import Generic, TypeVar, get_type_hints
+from typing import Any, Generic, get_type_hints
 
 import aiofiles
 import tomli
 import tomli_w
 import watchfiles
 from nonebot import logger
-from nonebot_plugin_localstore import _try_get_caller_plugin, get_config_dir
-from pydantic import BaseModel
+from nonebot_plugin_localstore import (  # type: ignore
+    _try_get_caller_plugin,
+    get_config_dir,
+)
 
-T = TypeVar("T", bound=BaseModel)
+from .types import BMODEL_T, CALLBACK_TYPE, FILTER_TYPE, T
 
-CALLBACK_TYPE = Callable[[str, Path], Awaitable]
-FILTER_TYPE = Callable[[watchfiles.main.FileChange], bool]
+
+def replace_env_vars(
+    data: BMODEL_T,
+) -> BMODEL_T:
+    """递归替换环境变量占位符，但不修改原始数据"""
+    data_copy = copy.deepcopy(data)  # 创建原始数据的深拷贝[4,5](@ref)
+    if isinstance(data_copy, dict):
+        for key, value in data_copy.items():
+            data_copy[key] = replace_env_vars(value)
+    elif isinstance(data_copy, list):
+        for i in range(len(data_copy)):
+            data_copy[i] = replace_env_vars(data_copy[i])
+    else:
+        patterns = (
+            r"\$\{(\w+)\}",
+            r"\{\{(\w+)\}\}",
+        )  # 支持两种格式的占位符，分别为 ${} 和 {{}}
+
+        def replacer(match: re.Match[str]) -> str:
+            var_name = match.group(1)
+            return os.getenv(var_name, "")  # 若未设置环境变量，返回空字符串
+
+        for pattern in patterns:
+            if re.search(pattern, data_copy):
+                # 如果匹配到占位符，则进行替换
+                data_copy = re.sub(pattern, replacer, data_copy)
+                break  # 替换后跳出循环，避免重复替换
+    return data_copy
 
 
 class BaseDataManager(ABC, Generic[T]):
     """
     配置数据管理器基类，实现基于类型注解的自动配置类推导
 
-    该类实现了灵活的配置管理机制，开发者只需声明 config 或 config_class
-    中的任意一个类型注解，系统将自动推导另一个，实现类型安全的配置管理。
+    该类实现了灵活的配置管理机制，开发者只需声明 config 的类型注解或 config_class = MyConfig
+    中的任意一个，系统将自动推导另一个，实现类型安全的配置管理。
 
     使用方式：
     - 方式1：class MyDataManager(BaseDataManager[MyConfig]): config: MyConfig
-    - 方式2：class MyDataManager(BaseDataManager[MyConfig]): config_class: Type[MyConfig]
+    - 方式2：class MyDataManager(BaseDataManager[MyConfig]): config_class = MyConfig
     """
 
     config: T  # 配置实例，延迟初始化
     config_class: type[T]  # 配置类类型，用于创建配置实例
-    _task: asyncio.Task  # 配置加载任务
-    _owner_name: str  # 拥有者插件名称
+    _task: asyncio.Task | None = None  # 配置加载任务
+    _owner_name = None  # 拥有者插件名称
     _inited: bool = False  # 是否已初始化
     _instance = None  # 单例实例
+    __lateinit__: bool = (
+        False  # 适用于DataManager需要暴露的情况使用，那么此时需要使用safe_get_config.
+    )
 
     def __new__(cls, *args, **kwargs):
-        """
-        实现单例模式，确保每个配置类只有一个实例
-
-        该方法检查是否已经存在一个实例，如果不存在则创建一个新的实例，
-        并初始化所有必要的类变量和配置。
-
-        Args:
-            cls: 当前类
-            *args: 位置参数
-            **kwargs: 关键字参数
-
-        Returns:
-            BaseDataManager: 类的单例实例
-        """
+        """实现单例模式，确保每个配置类只有一个实例"""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._owner_name = cls._owner_name or _try_get_caller_plugin().name
             cls.__init_classvars__()
-            cls._owner_name = (
-                getattr(cls, "_onwer_name", None) or _try_get_caller_plugin().name
-            )
-            cls._instance._init()
+            if not cls.__lateinit__:
+                cls._instance._init()
         return cls._instance
 
     @classmethod
@@ -100,19 +119,28 @@ class BaseDataManager(ABC, Generic[T]):
         """
         ...
 
-    async def safe_get_config(self) -> T:
+    @property
+    def owner_name(self) -> str:
         """
-        安全获取配置，等待配置加载完成
-
-        该方法确保在返回配置之前，配置加载任务已完成。
-        如果配置加载任务尚未完成，它会等待任务完成后再返回配置。
+        获取配置管理器的拥有者名称。
 
         Returns:
-            T: 配置实例
+            str: 配置管理器的拥有者名称
         """
+        assert self._owner_name is not None
+        return self._owner_name
+
+    async def safe_get_config(self) -> T:
+        """安全获取配置，等待配置加载完成"""
+        if not self._task:
+            self._init()
+        assert self._task
         if not self._task.done():
             await self._task
         return self.config
+
+    async def refresh_config(self):
+        self.config = await UniConfigManager().get_config(self._owner_name)
 
     def _init(self):
         async def callback(owner_name: str, path: Path):
@@ -156,6 +184,39 @@ class BaseDataManager(ABC, Generic[T]):
             self._inited = True
 
 
+class EnvfulConfigManager(BaseDataManager[T], Generic[T]):
+    config: T  # config属性实际上只是个占位符了,它是替换了环境变量的config
+    ins_config: T  # 实际配置实例
+    _cached_env_config: T | None = None
+    _conf_id: int = -1
+
+    def _update_cache(self, value: T | None = None):
+        value = value or self.ins_config
+        result = replace_env_vars(value.model_dump())
+        self._cached_env_config = self.config_class.model_validate(result)
+        self._config_id: int = hash(pickle.dumps(value))
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "config":
+            if self._cached_env_config is None:
+                self._update_cache()
+            return self._cached_env_config
+
+        return super().__getattribute__(name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "config":
+            if not isinstance(value, self.config_class):
+                raise TypeError(
+                    f"{self.__class__.__name__} config must be {self.config_class.__name__}"
+                )
+            if hash(pickle.dumps(value)) != self._conf_id:
+                self.ins_config = value
+            self._update_cache(value)
+        else:
+            return super().__setattr__(name, value)
+
+
 class UniConfigManager(Generic[T]):
     """
     为Amrita/NoneBot插件设计的统一配置管理器
@@ -176,9 +237,9 @@ class UniConfigManager(Generic[T]):
     _config_directories: dict[str, set[Path]]
     _config_file_cache: dict[str, StringIO]  # Path -> StringIO
     _config_instances: dict[str, T]
-    _tasks: list[Task]
+    _tasks: list[Task[Any]]
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, *args: Any, **kwargs: Any):
         """
         实现单例模式，确保UniConfigManager全局唯一
 
@@ -238,12 +299,13 @@ class UniConfigManager(Generic[T]):
             await self._init_config_or_nothing(owner_name, config_dir)
         if init_now:
             self._config_instances[owner_name] = await self.get_config(owner_name)
+            await self.save_config(owner_name)
 
         if watch:
-            callbacks = (
+            callbacks: list[CALLBACK_TYPE] = [
                 self._config_reload_callback,
                 *((on_reload,) if on_reload else ()),
-            )
+            ]
             await self._add_watch_path(
                 owner_name,
                 config_dir / "config.toml",
@@ -597,7 +659,7 @@ class UniConfigManager(Generic[T]):
             *callbacks (CALLBACK_TYPE): 回调函数列表
         """
 
-        async def excutor():
+        async def excutor() -> None:
             """
             执行文件监控任务
             """
@@ -619,7 +681,7 @@ class UniConfigManager(Generic[T]):
 
         self._tasks.append(asyncio.create_task(excutor()))
 
-    async def _config_reload_callback(self, plugin_name: str, _):
+    async def _config_reload_callback(self, plugin_name: str, _) -> None:
         """
         配置重载回调函数
 
@@ -631,7 +693,7 @@ class UniConfigManager(Generic[T]):
         await self._get_config_by_file(plugin_name)
         logger.success(f"{plugin_name} 配置文件已重载")
 
-    async def _file_reload_callback(self, plugin_name: str, path: Path):
+    async def _file_reload_callback(self, plugin_name: str, path: Path) -> None:
         """
         文件重载回调函数
 
@@ -648,7 +710,7 @@ class UniConfigManager(Generic[T]):
                 self._config_file_cache[path_str].write(await f.read())
         logger.success(f"{plugin_name} ({path.name})文件已重载")
 
-    def _clean_tasks(self):
+    def _clean_tasks(self) -> None:
         """
         清理所有任务
         """
