@@ -73,6 +73,8 @@ class BaseDataManager(ABC, Generic[T]):
     __lateinit__: bool = (
         False  # 适用于DataManager需要暴露的情况使用，那么此时需要使用safe_get_config.
     )
+    _ns_global: dict[str, Any] | None = None
+    _ns_local: dict[str, Any] | None = None
 
     def __new__(cls, *args, **kwargs):
         """实现单例模式，确保每个配置类只有一个实例"""
@@ -80,6 +82,8 @@ class BaseDataManager(ABC, Generic[T]):
             cls._instance = super().__new__(cls)
             cls._owner_name = cls._owner_name or _try_get_caller_plugin().name
             cls.__init_classvars__()
+            cls._ns_global = cls._ns_global or globals()
+            cls._ns_local = cls._ns_local or locals()
             if not cls.__lateinit__:
                 cls._instance._init()
         return cls._instance
@@ -165,7 +169,9 @@ class BaseDataManager(ABC, Generic[T]):
 
         if not self._inited:
             # 使用 get_type_hints 获取实际类型，正确处理前向引用
-            hints = get_type_hints(self)
+            hints: dict[str, Any] = get_type_hints(
+                self, globalns=self._ns_global, localns=self._ns_local
+            )
 
             # 如果 config_class 尚未设置，则从类型注解中推导
             if not getattr(self, "config_class", None):
