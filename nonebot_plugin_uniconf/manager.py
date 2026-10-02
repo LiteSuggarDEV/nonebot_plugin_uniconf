@@ -6,6 +6,7 @@ import re
 from abc import ABC
 from asyncio import Lock, Task
 from collections import defaultdict
+from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from typing import Any, Generic, get_type_hints
@@ -50,6 +51,16 @@ def replace_env_vars(
                 data_copy = re.sub(pattern, replacer, data_copy)
                 break  # 替换后跳出循环，避免重复替换
     return data_copy
+
+
+@dataclass(frozen=True)
+class _WatchEntry:
+    """单条文件监控注册项"""
+
+    plugin_name: str
+    path: Path
+    filter: FILTER_TYPE
+    callbacks: tuple[CALLBACK_TYPE, ...]
 
 
 class BaseDataManager(ABC, Generic[T]):
@@ -200,7 +211,7 @@ class EnvfulConfigManager(BaseDataManager[T], Generic[T]):
         value = value or self.ins_config
         result = replace_env_vars(value.model_dump())
         self._cached_env_config = self.config_class.model_validate(result)
-        self._config_id: int = hash(pickle.dumps(value))
+        self._conf_id = hash(pickle.dumps(value))
 
     def __getattribute__(self, name: str) -> Any:
         if name == "config":
@@ -243,7 +254,10 @@ class UniConfigManager(Generic[T]):
     _config_directories: dict[str, set[Path]]
     _config_file_cache: dict[str, StringIO]  # Path -> StringIO
     _config_instances: dict[str, T]
-    _tasks: list[Task[Any]]
+    _watch_entries: list[_WatchEntry]
+    _watcher_task: Task[Any] | None
+    _watch_dirty: asyncio.Event
+    _watch_stop: asyncio.Event | None
 
     def __new__(cls, *args: Any, **kwargs: Any):
         """
@@ -262,7 +276,10 @@ class UniConfigManager(Generic[T]):
             cls._callback_lock = defaultdict(Lock)
             cls._config_file_cache = {}
             cls._config_classes_id_to_config = {}
-            cls._tasks = []
+            cls._watch_entries = []
+            cls._watcher_task = None
+            cls._watch_dirty = asyncio.Event()
+            cls._watch_stop = None
         return cls._instance
 
     def __del__(self):
@@ -384,7 +401,7 @@ class UniConfigManager(Generic[T]):
         if watch:
             await self._add_watch_path(
                 owner_name,
-                config_dir,
+                file_path,
                 lambda change: Path(change[1]).name == name,
                 self._file_reload_callback,
             )
@@ -427,7 +444,11 @@ class UniConfigManager(Generic[T]):
                 Returns:
                     bool: 是否通过过滤
                 """
-                if not change[1].startswith(str(target_path)):
+                changed = Path(change[1])
+                try:
+                    if not changed.is_relative_to(target_path):
+                        return False
+                except ValueError:
                     return False
 
                 return int(change[0]) in (
@@ -658,34 +679,131 @@ class UniConfigManager(Generic[T]):
         """
         添加文件监听
 
+        不再为每个路径单独启动监控任务，而是把注册项写入全局注册表，
+        由唯一的 watcher 任务统一监控、串行派发。
+
+        注册键为 ``(plugin_name, path)``：同一路径被重复注册时不会追加新条目，
+        而是把新的回调并入已有条目，避免一次文件变更触发重复回调。
+
         Args:
             plugin_name (str): 插件名称
-            path (Path): 路径（相对路径）
+            path (Path): 路径
             filter (FILTER_TYPE): 过滤函数
             *callbacks (CALLBACK_TYPE): 回调函数列表
         """
-
-        async def excutor() -> None:
-            """
-            执行文件监控任务
-            """
-            try:
-                async for changes in watchfiles.awatch(path):
-                    if any(filter(change) for change in changes):
-                        try:
-                            async with self._callback_lock[plugin_name]:
-                                for callback in callbacks:
-                                    await callback(plugin_name, path)
-                        except Exception as e:
-                            logger.opt(exception=e, colors=True).error(
-                                "Error while calling callback function"
-                            )
-            except Exception as e:
-                logger.opt(exception=e, colors=True).error(
-                    f"Error in watcher for {path}"
+        target = Path(path)
+        for index, existing in enumerate(self._watch_entries):
+            if existing.plugin_name == plugin_name and existing.path == target:
+                merged = existing.callbacks + tuple(
+                    cb for cb in callbacks if cb not in existing.callbacks
                 )
+                if merged == existing.callbacks:
+                    # 已注册且没有新增回调，无需重启 watcher
+                    return
+                self._watch_entries[index] = _WatchEntry(
+                    plugin_name, target, existing.filter, merged
+                )
+                break
+        else:
+            self._watch_entries.append(
+                _WatchEntry(plugin_name, target, filter, tuple(callbacks))
+            )
+        self._watch_dirty.set()
+        # 已有 watcher 正在运行，通知它带上新的路径集合重启
+        if self._watch_stop is not None:
+            self._watch_stop.set()
+        self._ensure_watcher()
 
-        self._tasks.append(asyncio.create_task(excutor()))
+    def _ensure_watcher(self) -> None:
+        """确保唯一的 watcher 任务正在运行"""
+        if self._watcher_task is None or self._watcher_task.done():
+            self._watcher_task = asyncio.create_task(self._watcher_loop())
+
+    def _collect_roots(self) -> tuple[Path, ...]:
+        """
+        计算交给 watchfiles 的路径集合。
+
+        去重，并丢弃被某个目录根覆盖的子路径，避免同一文件被重复上报。
+        """
+        roots: list[Path] = []
+        for path in sorted(
+            {entry.path for entry in self._watch_entries},
+            key=lambda item: len(item.parts),
+        ):
+            if any(
+                path != root and path.is_relative_to(root) for root in roots
+            ):
+                continue
+            roots.append(path)
+        return tuple(roots)
+
+    @staticmethod
+    def _in_scope(changed: Path, watched: Path) -> bool:
+        """判断变更路径是否落在某条注册项的监控范围内"""
+        if changed == watched:
+            return True
+        try:
+            return changed.is_relative_to(watched)
+        except (TypeError, ValueError):
+            return False
+
+    async def _watcher_loop(self) -> None:
+        """
+        唯一的监控循环。
+
+        用一次 watchfiles.awatch 覆盖所有注册路径；注册表变化时通过
+        stop_event 退出，并带着新的路径集合重启。
+        """
+        while True:
+            paths = self._collect_roots()
+            if not paths:
+                await self._watch_dirty.wait()
+                self._watch_dirty.clear()
+                continue
+
+            stop = asyncio.Event()
+            self._watch_stop = stop
+            try:
+                async for changes in watchfiles.awatch(*paths, stop_event=stop):
+                    await self._dispatch(changes)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.opt(exception=e, colors=True).error("Error in watcher loop")
+            finally:
+                if self._watch_stop is stop:
+                    self._watch_stop = None
+
+            if not stop.is_set():
+                # awatch 非正常退出，稍作等待避免紧循环
+                await asyncio.sleep(1)
+
+    async def _dispatch(
+        self, changes: set[tuple[watchfiles.Change, str]]
+    ) -> None:
+        """把一批文件变更串行派发给匹配的注册项"""
+        for change in changes:
+            changed = Path(change[1])
+            for entry in tuple(self._watch_entries):
+                if not self._in_scope(changed, entry.path):
+                    continue
+                try:
+                    matched = entry.filter(change)
+                except Exception as e:
+                    logger.opt(exception=e, colors=True).error(
+                        f"Error in watch filter for {entry.path}"
+                    )
+                    continue
+                if not matched:
+                    continue
+                try:
+                    async with self._callback_lock[entry.plugin_name]:
+                        for callback in entry.callbacks:
+                            await callback(entry.plugin_name, entry.path)
+                except Exception as e:
+                    logger.opt(exception=e, colors=True).error(
+                        "Error while calling callback function"
+                    )
 
     async def _config_reload_callback(self, plugin_name: str, _) -> None:
         """
@@ -710,15 +828,15 @@ class UniConfigManager(Generic[T]):
         logger.info(f"{plugin_name} ({path.name})文件已修改，正在重载中......")
         async with self._lock[plugin_name]:
             path_str = str(path)
-            if path_str not in self._config_file_cache:
-                self._config_file_cache[path_str] = StringIO()
             async with aiofiles.open(path, encoding="utf-8") as f:
-                self._config_file_cache[path_str].write(await f.read())
+                self._config_file_cache[path_str] = StringIO(await f.read())
         logger.success(f"{plugin_name} ({path.name})文件已重载")
 
     def _clean_tasks(self) -> None:
         """
-        清理所有任务
+        清理 watcher 任务
         """
-        for task in self._tasks:
-            task.cancel()
+        if self._watcher_task is not None:
+            self._watcher_task.cancel()
+            self._watcher_task = None
+        self._watch_entries.clear()
