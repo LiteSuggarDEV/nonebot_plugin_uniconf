@@ -170,7 +170,7 @@ class BaseDataManager(ABC, Generic[T]):
         if not self._inited:
             # 使用 get_type_hints 获取实际类型，正确处理前向引用
             hints: dict[str, Any] = get_type_hints(
-                self, globalns=self._ns_global, localns=self._ns_local
+                type(self), globalns=self._ns_global, localns=self._ns_local
             )
 
             # 如果 config_class 尚未设置，则从类型注解中推导
