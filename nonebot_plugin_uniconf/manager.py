@@ -3,11 +3,13 @@ import copy
 import os
 import pickle
 import re
+import sys
 from abc import ABC
 from asyncio import Lock, Task
 from collections import defaultdict
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Generic, get_type_hints
 
 import aiofiles
@@ -21,6 +23,11 @@ from nonebot_plugin_localstore import (  # type: ignore
 )
 
 from .types import BMODEL_T, CALLBACK_TYPE, FILTER_TYPE, T
+
+if sys.version_info >= (3, 14):
+    from annotationlib import Format, get_annotations
+else:
+    from inspect import get_annotations
 
 
 def replace_env_vars(
@@ -82,8 +89,6 @@ class BaseDataManager(ABC, Generic[T]):
             cls._instance = super().__new__(cls)
             cls._owner_name = cls._owner_name or _try_get_caller_plugin().name
             cls.__init_classvars__()
-            cls._ns_global = cls._ns_global or globals()
-            cls._ns_local = cls._ns_local or locals()
             if not cls.__lateinit__:
                 cls._instance._init()
         return cls._instance
@@ -146,6 +151,28 @@ class BaseDataManager(ABC, Generic[T]):
     async def refresh_config(self):
         self.config = await UniConfigManager().get_config(self._owner_name)
 
+    def _infer_config_class(self) -> type[T]:
+        for owner in type(self).__mro__:
+            if sys.version_info >= (3, 14):
+                annotations = get_annotations(owner, format=Format.FORWARDREF)
+            else:
+                annotations = get_annotations(owner)
+            if "config" not in annotations:
+                continue
+
+            module = sys.modules.get(owner.__module__)
+            globalns = dict(vars(module)) if module is not None else {}
+            globalns.update(self._ns_global or {})
+            localns = dict(vars(owner))
+            localns.update(self._ns_local or {})
+            config_hint = SimpleNamespace(
+                __annotations__={"config": annotations["config"]}
+            )
+            return get_type_hints(config_hint, globalns=globalns, localns=localns)[
+                "config"
+            ]
+        raise AttributeError("`config_class` and type of config is not defined")
+
     def _init(self):
         async def callback(owner_name: str, path: Path):
             """
@@ -168,21 +195,8 @@ class BaseDataManager(ABC, Generic[T]):
             await self.__apost_init__()
 
         if not self._inited:
-            # 使用 get_type_hints 获取实际类型，正确处理前向引用
-            hints: dict[str, Any] = get_type_hints(
-                self, globalns=self._ns_global, localns=self._ns_local
-            )
-
-            # 如果 config_class 尚未设置，则从类型注解中推导
             if not getattr(self, "config_class", None):
-                if "config" in hints:
-                    # 子类只声明了 config 注解，将其类型用作 config_class
-                    self.config_class = hints["config"]
-                else:
-                    # 注解没有声明，抛出错误
-                    raise AttributeError(
-                        "`config_class` and type of config is not defined"
-                    )
+                self.config_class = self._infer_config_class()
 
             # 创建配置加载任务
             self._task = asyncio.create_task(init())
